@@ -4,7 +4,7 @@ import * as iconv from 'iconv-lite'
 import { DOMParser } from 'xmldom'
 
 /** The encoding all Xdebug messages are encoded with */
-export const ENCODING = 'iso-8859-1'
+export const ENCODING = 'utf-8'
 
 /** The two states the connection switches between */
 enum ParsingState {
@@ -121,6 +121,10 @@ export class DbgpConnection extends EventEmitter {
     /** closes the underlying socket */
     public close(): Promise<void> {
         return new Promise<void>((resolve, reject) => {
+            if (this._socket.destroyed) {
+                resolve()
+                return
+            }
             this._socket.once('close', resolve)
             this._socket.end()
         })

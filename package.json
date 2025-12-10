@@ -21,8 +21,8 @@
     }
   ],
   "engines": {
-    "vscode": "^1.53.0",
-    "node": "^14.0.0"
+    "vscode": "^1.63.2",
+    "node": "^16.13.1"
   },
   "icon": "images/logo.png",
   "galleryBanner": {
@@ -45,38 +45,42 @@
     "minimatch": "^3.0.4",
     "moment": "^2.29.1",
     "relateurl": "^0.2.7",
+    "semver": "^7.3.5",
+    "string-replace-async": "^2.0.0",
     "url-relative": "^1.0.0",
     "urlencode": "^1.1.0",
-    "vscode-debugadapter": "^1.47.0",
-    "vscode-debugprotocol": "^1.47.0",
+    "vscode-debugadapter": "^1.50.0",
+    "vscode-debugprotocol": "^1.50.1",
+    "which": "^2.0.2",
     "xmldom": "^0.6.0"
   },
   "devDependencies": {
-    "@commitlint/cli": "^12.1.4",
-    "@commitlint/config-conventional": "^12.1.4",
-    "@types/chai": "4.2.21",
+    "@commitlint/cli": "^16.0.1",
+    "@commitlint/config-conventional": "^16.0.0",
+    "@types/chai": "4.3.0",
     "@types/chai-as-promised": "^7.1.4",
     "@types/minimatch": "^3.0.5",
     "@types/mocha": "^9.0.0",
-    "@types/node": "^14.14.14",
+    "@types/node": "^16.11.17",
     "@types/relateurl": "^0.2.29",
-    "@types/semver": "^7.3.7",
+    "@types/semver": "^7.3.9",
     "@types/urlencode": "^1.1.2",
+    "@types/vscode": "^1.63.1",
+    "@types/which": "^2.0.1",
     "@types/xmldom": "^0.1.31",
     "chai": "^4.3.4",
     "chai-as-promised": "^7.1.1",
-    "husky": "^7.0.1",
-    "mocha": "^9.0.2",
+    "husky": "^7.0.4",
+    "mocha": "^9.1.3",
     "nyc": "^15.1.0",
-    "prettier": "2.3.2",
-    "semantic-release": "^17.4.4",
-    "semantic-release-vsce": "^3.4.1",
-    "semver": "^7.3.5",
+    "prettier": "2.5.1",
+    "semantic-release": "^18.0.1",
+    "semantic-release-vsce": "^3.5.0",
     "tslint": "^5.20.1",
     "tslint-config-prettier": "^1.18.0",
-    "typescript": "^4.3.5",
-    "vsce": "^1.96.1",
-    "vscode-debugadapter-testsupport": "^1.47.0"
+    "typescript": "^4.5.4",
+    "vsce": "^2.6.3",
+    "vscode-debugadapter-testsupport": "^1.50.0"
   },
   "release": {
     "branches": [
@@ -136,6 +140,20 @@
     "exclude": [
       "out/test/**/*.*"
     ]
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onDebugResolve:php",
+    "onCommand:php.debug.debugPhpFile"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "%workspaceTrust%",
+      "restrictedConfigurations": [
+        "php.debug.executablePath"
+      ]
+    }
   },
   "contributes": {
     "breakpoints": [
@@ -241,6 +259,41 @@
                 "type": "boolean",
                 "description": "If true, will log all communication between VS Code and the adapter"
               },
+              "proxy": {
+                "type": "object",
+                "properties": {
+                  "allowMultipleSessions": {
+                    "type": "boolean",
+                    "description": "If the proxy should expect multiple sessions/connections or not.",
+                    "default": true
+                  },
+                  "enable": {
+                    "type": "boolean",
+                    "description": "Whether to enable usage of a proxy",
+                    "default": false
+                  },
+                  "host": {
+                    "type": "string",
+                    "description": "Selects the host where the debug client is running, you can either use a host name, IP address, or 'unix:///path/to/sock' for a Unix domain socket. This setting is ignored if xdebug.remote_connect_back is enabled.",
+                    "default": "127.0.0.1"
+                  },
+                  "key": {
+                    "type": "string",
+                    "description": "A unique key that allows the proxy to match requests to your editor",
+                    "default": "${config:php.debug.ideKey}"
+                  },
+                  "port": {
+                    "type": "number",
+                    "description": "The port where the adapter will register with the the proxy.",
+                    "default": 9001
+                  },
+                  "timeout": {
+                    "type": "number",
+                    "description": "The port where the adapter will register with the the proxy.",
+                    "default": 3000
+                  }
+                }
+              },
               "xdebugSettings": {
                 "type": "object",
                 "properties": {
@@ -252,6 +305,10 @@
                     "type": "integer",
                     "description": "max amount of variable data to initially retrieve"
                   },
+                  "max_depth": {
+                    "type": "integer",
+                    "description": "maximum depth that the debugger engine may return when sending arrays, hashes or object structures to the IDE"
+                  },
                   "show_hidden": {
                     "enum": [
                       0,
@@ -262,6 +319,11 @@
                 },
                 "description": "Overrides for Xdebug remote debugging settings. See https://xdebug.org/docs-dbgp.php#feature-names",
                 "default": {}
+              },
+              "maxConnections": {
+                "type": "number",
+                "description": "The maximum allowed parallel debugging sessions",
+                "default": 0
               }
             }
           }
@@ -391,6 +453,42 @@
             }
           }
         ]
+      }
+    ],
+    "configuration": {
+      "title": "PHP Debug",
+      "properties": {
+        "php.debug.executablePath": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "The path to a PHP executable.",
+          "scope": "machine-overridable"
+        },
+        "php.debug.ideKey": {
+          "type": "string",
+          "default": "vsc",
+          "description": "A unique key that allows the proxy to match requests to your editor. Only used when proxy configuration includes replacement.",
+          "scope": "machine-overridable"
+        }
+      }
+    },
+    "menus": {
+      "editor/title/run": [
+        {
+          "command": "php.debug.debugPhpFile",
+          "when": "resourceLangId == php && !inDiffEditor"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "php.debug.debugPhpFile",
+        "title": "Debug PHP",
+        "icon": "$(debug-alt-small)",
+        "enablement": "resourceLangId == php"
       }
     ]
   }

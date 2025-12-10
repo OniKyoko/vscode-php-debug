@@ -12,6 +12,9 @@ import { Terminal } from './terminal'
 import { convertClientPathToDebugger, convertDebuggerPathToClient } from './paths'
 import minimatch = require('minimatch')
 import { BreakpointManager, BreakpointAdapter } from './breakpoints'
+import * as semver from 'semver'
+import { LogPointManager } from './logpoint'
+import { ProxyConnect } from './proxyConnect'
 
 if (process.env['VSCODE_NLS_CONFIG']) {
     try {
@@ -50,7 +53,7 @@ function formatPropertyValue(property: xdebug.BaseProperty): string {
 /**
  * This interface should always match the schema found in the mock-debug extension manifest.
  */
-interface LaunchRequestArguments extends VSCodeDebugProtocol.LaunchRequestArguments {
+export interface LaunchRequestArguments extends VSCodeDebugProtocol.LaunchRequestArguments {
     /** The address to bind to for listening for Xdebug connections (default: all IPv6 connections if available, else all IPv4 connections) */
     hostname?: string
     /** The port where the adapter should listen for Xdebug connections (default: 9003) */
@@ -69,6 +72,15 @@ interface LaunchRequestArguments extends VSCodeDebugProtocol.LaunchRequestArgume
     ignore?: string[]
     /** Xdebug configuration */
     xdebugSettings?: { [featureName: string]: string | number }
+    /** proxy connection configuration */
+    proxy?: {
+        allowMultipleSessions: boolean
+        enable: boolean
+        host: string
+        key: string
+        port: number
+        timeout: number
+    }
 
     // CLI options
 
@@ -86,6 +98,8 @@ interface LaunchRequestArguments extends VSCodeDebugProtocol.LaunchRequestArgume
     env?: { [key: string]: string }
     /** If true launch the target in an external console. */
     externalConsole?: boolean
+    /** Maximum allowed parallel debugging sessions */
+    maxConnections?: number
 }
 
 class PhpDebugSession extends vscode.DebugSession {
@@ -147,6 +161,22 @@ class PhpDebugSession extends vscode.DebugSession {
     /** Breakpoint Adapters */
     private _breakpointAdapters = new Map<xdebug.Connection, BreakpointAdapter>()
 
+    /**
+     * The manager for logpoints. Since xdebug does not support anything like logpoints,
+     * it has to be managed by the extension/debug server. It does that by a Map referencing
+     * the log messages per file. Xdebug sees it as a regular breakpoint.
+     */
+    private _logPointManager = new LogPointManager()
+
+    /** The proxy initialization and termination connection. */
+    private _proxyConnect: ProxyConnect
+
+    /** the promise that gets resolved once we receive the done request */
+    private _donePromise: Promise<void>
+
+    /** resolves the done promise */
+    private _donePromiseResolveFn: () => any
+
     public constructor() {
         super()
         this.setDebuggerColumnsStartAt1(true)
@@ -163,6 +193,9 @@ class PhpDebugSession extends vscode.DebugSession {
             supportsEvaluateForHovers: false,
             supportsConditionalBreakpoints: true,
             supportsFunctionBreakpoints: true,
+            supportsLogPoints: true,
+            supportsHitConditionalBreakpoints: true,
+            supportsCompletionsRequest: true,
             exceptionBreakpointFilters: [
                 {
                     filter: 'Notice',
@@ -188,8 +221,6 @@ class PhpDebugSession extends vscode.DebugSession {
             supportTerminateDebuggee: true,
         }
         this.sendResponse(response)
-        // request breakpoints right away
-        this.sendEvent(new vscode.InitializedEvent())
     }
 
     protected attachRequest(
@@ -210,6 +241,11 @@ class PhpDebugSession extends vscode.DebugSession {
             args.pathMappings = pathMappings
         }
         this._args = args
+
+        this._donePromise = new Promise<void>((resolve, reject) => {
+            this._donePromiseResolveFn = resolve
+        })
+
         /** launches the script as CLI */
         const launchScript = async (port: number) => {
             // check if program exists
@@ -268,21 +304,40 @@ class PhpDebugSession extends vscode.DebugSession {
                 server.on('connection', async (socket: net.Socket) => {
                     try {
                         // new Xdebug connection
+                        // first check if we have a limit on connections
+                        if (args.maxConnections ?? 0 > 0) {
+                            if (this._connections.size >= args.maxConnections!) {
+                                if (args.log) {
+                                    this.sendEvent(
+                                        new vscode.OutputEvent(
+                                            `new connection from ${socket.remoteAddress} - dropping due to max connection limit\n`
+                                        ),
+                                        true
+                                    )
+                                }
+                                socket.end()
+                                return
+                            }
+                        }
+
                         const connection = new xdebug.Connection(socket)
                         if (args.log) {
-                            this.sendEvent(new vscode.OutputEvent('new connection ' + connection.id + '\n'), true)
+                            this.sendEvent(
+                                new vscode.OutputEvent(
+                                    `new connection ${connection.id} from ${socket.remoteAddress}\n`
+                                ),
+                                true
+                            )
                         }
                         this._connections.set(connection.id, connection)
                         const disposeConnection = (error?: Error) => {
                             if (this._connections.has(connection.id)) {
                                 if (args.log) {
-                                    this.sendEvent(new vscode.OutputEvent('connection ' + connection.id + ' closed\n'))
+                                    this.sendEvent(new vscode.OutputEvent(`connection ${connection.id} closed\n`))
                                 }
                                 if (error) {
                                     this.sendEvent(
-                                        new vscode.OutputEvent(
-                                            'connection ' + connection.id + ': ' + error.message + '\n'
-                                        )
+                                        new vscode.OutputEvent(`connection ${connection.id}: ${error.message}\n`)
                                     )
                                 }
                                 this.sendEvent(new vscode.ContinuedEvent(connection.id, false))
@@ -304,56 +359,89 @@ class PhpDebugSession extends vscode.DebugSession {
                                 this.sendEvent(new vscode.OutputEvent(log), true)
                             }
                         })
-                        await connection.waitForInitPacket()
-
-                        // support for breakpoints
-                        let feat_rb = await connection.sendFeatureGetCommand('resolved_breakpoints')
-                        if (feat_rb.supported === '1') {
-                            await connection.sendFeatureSetCommand('resolved_breakpoints', '1')
-                        }
-                        let feat_no = await connection.sendFeatureGetCommand('notify_ok')
-                        if (feat_no.supported === '1') {
-                            await connection.sendFeatureSetCommand('notify_ok', '1')
-                        }
-                        let feat_ep = await connection.sendFeatureGetCommand('extended_properties')
-                        if (feat_ep.supported === '1') {
-                            await connection.sendFeatureSetCommand('extended_properties', '1')
-                        }
-
-                        // override features from launch.json
                         try {
-                            const xdebugSettings = args.xdebugSettings || {}
-                            await Promise.all(
-                                Object.keys(xdebugSettings).map(setting =>
-                                    connection.sendFeatureSetCommand(setting, xdebugSettings[setting])
+                            const initPacket = await connection.waitForInitPacket()
+
+                            // support for breakpoints
+                            let feat: xdebug.FeatureGetResponse
+                            const supportedEngine =
+                                initPacket.engineName === 'Xdebug' &&
+                                semver.valid(initPacket.engineVersion, { loose: true }) &&
+                                semver.gte(initPacket.engineVersion, '3.0.0', { loose: true })
+                            if (
+                                supportedEngine ||
+                                ((feat = await connection.sendFeatureGetCommand('resolved_breakpoints')) &&
+                                    feat.supported === '1')
+                            ) {
+                                await connection.sendFeatureSetCommand('resolved_breakpoints', '1')
+                            }
+                            if (
+                                supportedEngine ||
+                                ((feat = await connection.sendFeatureGetCommand('notify_ok')) && feat.supported === '1')
+                            ) {
+                                await connection.sendFeatureSetCommand('notify_ok', '1')
+                                connection.on('notify_user', notify => this.handleUserNotify(notify, connection))
+                            }
+                            if (
+                                supportedEngine ||
+                                ((feat = await connection.sendFeatureGetCommand('extended_properties')) &&
+                                    feat.supported === '1')
+                            ) {
+                                await connection.sendFeatureSetCommand('extended_properties', '1')
+                            }
+
+                            // override features from launch.json
+                            try {
+                                const xdebugSettings = args.xdebugSettings || {}
+                                await Promise.all(
+                                    Object.keys(xdebugSettings).map(setting =>
+                                        connection.sendFeatureSetCommand(setting, xdebugSettings[setting])
+                                    )
+                                )
+                            } catch (error) {
+                                throw new Error(
+                                    'Error applying xdebugSettings: ' + (error instanceof Error ? error.message : error)
+                                )
+                            }
+
+                            this.sendEvent(new vscode.ThreadEvent('started', connection.id))
+
+                            // wait for all breakpoints
+                            await this._donePromise
+
+                            let bpa = new BreakpointAdapter(connection, this._breakpointManager)
+                            bpa.on('dapEvent', event => this.sendEvent(event))
+                            this._breakpointAdapters.set(connection, bpa)
+                            // sync breakpoints to connection
+                            await bpa.process()
+                            let xdebugResponse: xdebug.StatusResponse
+                            // either tell VS Code we stopped on entry or run the script
+                            if (this._args.stopOnEntry) {
+                                // do one step to the first statement
+                                this._hasStoppedOnEntry = false
+                                xdebugResponse = await connection.sendStepIntoCommand()
+                            } else {
+                                xdebugResponse = await connection.sendRunCommand()
+                            }
+                            this._checkStatus(xdebugResponse)
+                        } catch (error) {
+                            this.sendEvent(
+                                new vscode.OutputEvent(
+                                    `Failed initializing connection ${connection.id}: ` +
+                                        (error instanceof Error ? error.message : error) +
+                                        '\n',
+                                    'stderr'
                                 )
                             )
-                        } catch (error) {
-                            throw new Error(
-                                'Error applying xdebugSettings: ' + (error instanceof Error ? error.message : error)
-                            )
+                            disposeConnection()
+                            socket.destroy()
                         }
-
-                        this.sendEvent(new vscode.ThreadEvent('started', connection.id))
-
-                        let bpa = new BreakpointAdapter(connection, this._breakpointManager)
-                        bpa.on('dapEvent', event => this.sendEvent(event))
-                        this._breakpointAdapters.set(connection, bpa)
-                        // sync breakpoints to connection
-                        await bpa.process()
-                        let xdebugResponse: xdebug.StatusResponse
-                        // either tell VS Code we stopped on entry or run the script
-                        if (this._args.stopOnEntry) {
-                            // do one step to the first statement
-                            this._hasStoppedOnEntry = false
-                            xdebugResponse = await connection.sendStepIntoCommand()
-                        } else {
-                            xdebugResponse = await connection.sendRunCommand()
-                        }
-                        this._checkStatus(xdebugResponse)
                     } catch (error) {
                         this.sendEvent(
-                            new vscode.OutputEvent((error instanceof Error ? error.message : error) + '\n', 'stderr')
+                            new vscode.OutputEvent(
+                                'Error in socket server: ' + (error instanceof Error ? error.message : error) + '\n',
+                                'stderr'
+                            )
                         )
                         this.shutdown()
                     }
@@ -373,6 +461,9 @@ class PhpDebugSession extends vscode.DebugSession {
             let port = 0
             if (!args.noDebug) {
                 port = await createServer()
+                if (args.proxy?.enable === true) {
+                    await this.setupProxy(port)
+                }
             }
             if (args.program || args.runtimeArgs) {
                 await launchScript(port)
@@ -382,6 +473,28 @@ class PhpDebugSession extends vscode.DebugSession {
             return
         }
         this.sendResponse(response)
+        // request breakpoints
+        this.sendEvent(new vscode.InitializedEvent())
+    }
+
+    private async setupProxy(idePort: number): Promise<void> {
+        this._proxyConnect = new ProxyConnect(
+            this._args.proxy!.host,
+            this._args.proxy!.port,
+            idePort,
+            this._args.proxy!.allowMultipleSessions,
+            this._args.proxy!.key,
+            this._args.proxy!.timeout
+        )
+        const proxyConsole = (str: string) => this.sendEvent(new vscode.OutputEvent(str + '\n'), true)
+
+        this._proxyConnect.on('log_request', proxyConsole)
+        this._proxyConnect.on('log_response', proxyConsole)
+
+        this._proxyConnect.on('log_error', (error: Error) => {
+            this.sendEvent(new vscode.OutputEvent('PROXY ERROR: ' + error.message + '\n', 'stderr'))
+        })
+        return this._proxyConnect.sendProxyInitCommand()
     }
 
     /**
@@ -430,6 +543,24 @@ class PhpDebugSession extends vscode.DebugSession {
                 stoppedEventReason = 'step'
             } else {
                 stoppedEventReason = 'breakpoint'
+            }
+            // Check for log points
+            if (this._logPointManager.hasLogPoint(response.fileUri, response.line)) {
+                const logMessage = await this._logPointManager.resolveExpressions(
+                    response.fileUri,
+                    response.line,
+                    async (expr: string): Promise<string> => {
+                        const evaluated = await connection.sendEvalCommand(expr)
+                        return formatPropertyValue(evaluated.result)
+                    }
+                )
+
+                this.sendEvent(new vscode.OutputEvent(logMessage + '\n', 'console'))
+                if (stoppedEventReason === 'breakpoint') {
+                    const responseCommand = await connection.sendRunCommand()
+                    await this._checkStatus(responseCommand)
+                    return
+                }
             }
             const event: VSCodeDebugProtocol.StoppedEvent = new vscode.StoppedEvent(
                 stoppedEventReason,
@@ -496,6 +627,24 @@ class PhpDebugSession extends vscode.DebugSession {
         }
     }
 
+    protected handleUserNotify(notify: xdebug.UserNotify, connection: xdebug.Connection) {
+        if (notify.property !== undefined) {
+            const event: VSCodeDebugProtocol.OutputEvent = new vscode.OutputEvent('', 'stdout')
+            const property = new xdebug.SyntheticProperty('', 'object', formatPropertyValue(notify.property), [
+                notify.property,
+            ])
+            let variablesReference = this._variableIdCounter++
+            this._evalResultProperties.set(variablesReference, property)
+            event.body.variablesReference = variablesReference
+            if (notify.fileUri.startsWith('file://')) {
+                const filePath = convertDebuggerPathToClient(notify.fileUri, this._args.pathMappings)
+                event.body.source = { name: path.basename(filePath), path: filePath }
+                event.body.line = notify.line
+            }
+            this.sendEvent(event)
+        }
+    }
+
     /** This is called for each source file that has breakpoints with all the breakpoints in that file and whenever these change. */
     protected async setBreakPointsRequest(
         response: VSCodeDebugProtocol.SetBreakpointsResponse,
@@ -505,6 +654,11 @@ class PhpDebugSession extends vscode.DebugSession {
             const fileUri = convertClientPathToDebugger(args.source.path!, this._args.pathMappings)
             const vscodeBreakpoints = this._breakpointManager.setBreakPoints(args.source, fileUri, args.breakpoints!)
             response.body = { breakpoints: vscodeBreakpoints }
+            // Process logpoints
+            this._logPointManager.clearFromFile(fileUri)
+            args.breakpoints!.filter(breakpoint => breakpoint.logMessage).forEach(breakpoint => {
+                this._logPointManager.addLogPoint(fileUri, breakpoint.line, breakpoint.logMessage!)
+            })
         } catch (error) {
             this.sendErrorResponse(response, error)
             return
@@ -550,6 +704,7 @@ class PhpDebugSession extends vscode.DebugSession {
         args: VSCodeDebugProtocol.ConfigurationDoneArguments
     ) {
         this.sendResponse(response)
+        this._donePromiseResolveFn()
     }
 
     /** Executed after a successful launch or attach request and after a ThreadEvent */
@@ -799,11 +954,33 @@ class PhpDebugSession extends vscode.DebugSession {
                     } else {
                         evaluateName = property.name
                     }
+                    let presentationHint: VSCodeDebugProtocol.VariablePresentationHint = {}
+                    if (property.facets?.length) {
+                        if (property.facets.includes('public')) {
+                            presentationHint.visibility = 'public'
+                        } else if (property.facets.includes('private')) {
+                            presentationHint.visibility = 'private'
+                        } else if (property.facets.includes('protected')) {
+                            presentationHint.visibility = 'protected'
+                        }
+                        if (property.facets.includes('readonly')) {
+                            presentationHint.attributes = presentationHint.attributes || []
+                            presentationHint.attributes.push('readOnly')
+                        }
+                        if (property.facets.includes('static')) {
+                            presentationHint.attributes = presentationHint.attributes || []
+                            presentationHint.attributes.push('static')
+                        }
+                        if (property.facets.includes('virtual')) {
+                            presentationHint.kind = 'virtual'
+                        }
+                    }
                     const variable: VSCodeDebugProtocol.Variable = {
                         name: property.name,
                         value: displayValue,
                         type: property.type,
                         variablesReference,
+                        presentationHint,
                         evaluateName,
                     }
                     return variable
@@ -812,6 +989,124 @@ class PhpDebugSession extends vscode.DebugSession {
             response.body = { variables }
         } catch (error) {
             this.sendErrorResponse(response, error)
+            return
+        }
+        this.sendResponse(response)
+    }
+
+    protected async completionsRequest(
+        response: VSCodeDebugProtocol.CompletionsResponse,
+        args: VSCodeDebugProtocol.CompletionsArguments
+    ) {
+        try {
+            if (!args.frameId) {
+                throw new Error('No stack frame given')
+            }
+            const lineIndex: number = args.line ? args.line - 1 : 0
+            const lines: string[] = args.text.split('\n')
+            /** The text before the cursor */
+            const typed: string = [
+                ...lines.slice(0, Math.max(lineIndex - 1, 0)),
+                lines[lineIndex].substring(0, args.column),
+            ].join('\n')
+            let i = typed.length
+            let containerName: string
+            let operator: string | undefined
+            let query: string
+            while (true) {
+                const substr = typed.substring(0, i)
+                if (/\[$/.test(substr)) {
+                    // Numeric array index
+                    operator = '['
+                } else if (/\['$/.test(substr)) {
+                    // String array index
+                    operator = `['`
+                } else if (/->$/.test(substr)) {
+                    operator = '->'
+                } else if (i > 0) {
+                    i--
+                    continue
+                }
+                query = typed.substr(i).toLowerCase()
+                containerName = typed.substring(0, operator ? i - operator.length : i)
+                break
+            }
+            const frame = this._stackFrames.get(args.frameId)!
+            const contexts = await frame.getContexts()
+            const targets: VSCodeDebugProtocol.CompletionItem[] = []
+            if (!containerName || !operator) {
+                const responses = await Promise.all(contexts.map(context => context.getProperties()))
+                for (const properties of responses) {
+                    for (const property of properties) {
+                        if (property.name.toLowerCase().startsWith(query)) {
+                            const text = property.name[0] === '$' ? property.name.substr(1) : property.name
+                            targets.push({
+                                label: property.name,
+                                text,
+                                type: 'variable',
+                                //start: i,
+                                length: property.name.length,
+                            })
+                        }
+                    }
+                }
+            } else {
+                // Search all contexts
+                for (const context of contexts) {
+                    let response: xdebug.PropertyGetResponse | undefined
+                    try {
+                        response = await frame.connection.sendPropertyGetCommand({ context, fullName: containerName })
+                    } catch (err) {
+                        // ignore
+                    }
+                    if (response) {
+                        for (const property of response.children) {
+                            if (property.name.toLowerCase().startsWith(query)) {
+                                let type: VSCodeDebugProtocol.CompletionItemType | undefined
+                                let text: string = property.name
+                                if (operator === '->') {
+                                    // Object
+                                    type = 'property'
+                                } else if (operator[0] === '[') {
+                                    // Array
+                                    if (parseInt(property.name) + '' === property.name) {
+                                        // Numeric index
+                                        if (operator[1] === `'`) {
+                                            continue
+                                        }
+                                        type = 'value'
+                                        text += ']'
+                                    } else {
+                                        // String index
+                                        if (operator[1] !== `'`) {
+                                            if (query) {
+                                                continue
+                                            } else {
+                                                text = `'` + text
+                                            }
+                                        }
+                                        type = 'text'
+                                        text += `']`
+                                    }
+                                }
+                                targets.push({
+                                    label: property.name,
+                                    text,
+                                    type,
+                                    //start: i,
+                                    length: property.name.length,
+                                })
+                            }
+                        }
+                        // If we found the variable in one context (typically Locals), abort
+                        break
+                    }
+                }
+            }
+            console.log(`completionsRequest ${args.text} (${args.column}:${args.line}) ${JSON.stringify(targets)}`)
+            response.body = { targets }
+        } catch (err) {
+            this.sendErrorResponse(response, err)
             return
         }
         this.sendResponse(response)
@@ -955,6 +1250,10 @@ class PhpDebugSession extends vscode.DebugSession {
             // If launched as CLI, kill process
             if (this._phpProcess) {
                 this._phpProcess.kill()
+            }
+            // Unregister proxy
+            if (this._proxyConnect) {
+                await this._proxyConnect.sendProxyStopCommand()
             }
         } catch (error) {
             this.sendErrorResponse(response, error)

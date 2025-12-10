@@ -11,7 +11,7 @@ Manage pull requests and conduct code reviews in your IDE with full source-tree 
 
 ### Sponsor PHP Debug Adapter for Visual Studio Code
 
-If you find this extension usefull, if it helps you solve your problems and if you appreciate the support given here, consider sponsoring our work.
+If you find this extension useful, if it helps you solve your problems and if you appreciate the support given here, consider sponsoring our work.
 
 ## Installation
 
@@ -23,7 +23,7 @@ This extension is a debug adapter between VS Code and [Xdebug](https://xdebug.or
    **_I highly recommend you make a simple `test.php` file, put a `phpinfo();` statement in there, then copy the output and paste it into the [Xdebug installation wizard](https://xdebug.org/wizard.php). It will analyze it and give you tailored installation instructions for your environment._** In short:
 
    - On Windows: [Download](https://xdebug.org/download.php) the appropriate precompiled DLL for your PHP version, architecture (64/32 Bit), thread safety (TS/NTS) and Visual Studio compiler version and place it in your PHP extension folder.
-   - On Linux: Either download the source code as a tarball or [clone it with git](https://xdebug.org/docs/install#source), then [compile it](https://xdebug.org/docs/install#compile).
+   - On Linux: Either download the source code as a tarball or [clone it with git](https://xdebug.org/docs/install#source), then [compile it](https://xdebug.org/docs/install#compile). Or see if your distribution already offers prebuilt packages.
 
 2. [Configure PHP to use Xdebug](https://xdebug.org/docs/install#configure-php) by adding `zend_extension=path/to/xdebug` to your php.ini. The path of your php.ini is shown in your `phpinfo()` output under "Loaded Configuration File".
 
@@ -41,7 +41,7 @@ This extension is a debug adapter between VS Code and [Xdebug](https://xdebug.or
    ```ini
    xdebug.remote_enable = 1
    xdebug.remote_autostart = 1
-   xdebug.remote_port = 9003
+   xdebug.remote_port = 9000
    ```
 
    There are other ways to tell Xdebug to connect to a remote debugger, like cookies, query parameters or browser extensions. I recommend `remote_autostart` (Xdebug v2)/`start_with_request` (Xdebug v3) because it "just works". There are also a variety of other options, like the port, please see the [Xdebug documentation on remote debugging](https://xdebug.org/docs/remote#starting) for more information. Please note that the default Xdebug port changed between Xdebug v2 to v3 from 9000 to 9003.
@@ -61,7 +61,11 @@ In your project, go to the debugger and hit the little gear icon and choose _PHP
 - **Launch Built-in web server**
   This configuration starts the PHP built-in web server on a random port and opens the browser with the `serverReadyAction` directive. The port is random (localhost:0) but can be changed to a desired fixed port (ex: localhost:8080). If a router script is needed, add it with `program` directive. Additional PHP/Xdebug directives trigger debugging on every page load.
 
+There are also configurations for Xdebug v2 (Legacy) installations.
+
 More general information on debugging with VS Code can be found on https://code.visualstudio.com/docs/editor/debugging.
+
+> _Note:_ You can even debug a script without `launch.json`. If no folder is open, and the VS Code status bar is purple, pressing `F5` will start the open script with Xdebug3 specific parameters. If the php executable is not in path, you can provide it with the setting `php.debug.executablePath`. For debugging to work, Xdebug must still be correctly installed.
 
 #### Supported launch.json settings:
 
@@ -72,11 +76,19 @@ More general information on debugging with VS Code can be found on https://code.
 - `pathMappings`: A list of server paths mapping to the local source paths on your machine, see "Remote Host Debugging" below
 - `log`: Whether to log all communication between VS Code and the adapter to the debug console. See _Troubleshooting_ further down.
 - `ignore`: An optional array of glob patterns that errors should be ignored from (for example `**/vendor/**/*.php`)
+- `maxConnections`: Accept only this number of parallel debugging sessions. Additional connections will be dropped and their execution will continue without debugging.
+- `proxy`: DBGp Proxy settings
+  - `enable`: To enable proxy registration set to `true` (default is `false).
+  - `host`: The address of the proxy. Supports host name, IP address, or Unix domain socket (default: 127.0.0.1).
+  - `port`: The port where the adapter will register with the the proxy (default: `9001`).
+  - `key`: A unique key that allows the proxy to match requests to your editor (default: `vsc`). The default is taken from VSCode settings `php.debug.idekey`.
+  - `timeout`: The number of milliseconds to wait before giving up on the connection to proxy (default: `3000`).
+  - `allowMultipleSessions`: If the proxy should forward multiple sessions/connections at the same time or not (default: `true`).
 - `xdebugSettings`: Allows you to override Xdebug's remote debugging settings to fine tuning Xdebug to your needs. For example, you can play with `max_children` and `max_depth` to change the max number of array and object children that are retrieved and the max depth in structures like arrays and objects. This can speed up the debugger on slow machines.
   For a full list of feature names that can be set please refer to the [Xdebug documentation](https://xdebug.org/docs-dbgp.php#feature-names).
   - `max_children`: max number of array or object children to initially retrieve
   - `max_data`: max amount of variable data to initially retrieve.
-  - `max_depth`: maximum depth that the debugger engine may return when sending arrays, hashs or object structures to the IDE (there should be no need to change this as depth is retrieved incrementally, large value can cause IDE to hang).
+  - `max_depth`: maximum depth that the debugger engine may return when sending arrays, hashes or object structures to the IDE (there should be no need to change this as depth is retrieved incrementally, large value can cause IDE to hang).
   - `show_hidden`: This feature can get set by the IDE if it wants to have more detailed internal information on properties (eg. private members of classes, etc.) Zero means that hidden members are not shown to the IDE.
 
 Options specific to CLI debugging:
@@ -93,6 +105,7 @@ Options specific to CLI debugging:
 
 - Line breakpoints
 - Conditional breakpoints
+- Hit count breakpoints: supports the conditions like `>=n`, `==n` and `%n`
 - Function breakpoints
 - Step over, step in, step out
 - Break on entry
@@ -101,13 +114,15 @@ Options specific to CLI debugging:
 - Stack traces, scope variables, superglobals, user defined constants
 - Arrays & objects (including classname, private and static properties)
 - Debug console
+- Autocompletion in debug console for variables, array indexes, object properties (even nested)
 - Watches
 - Run as CLI
 - Run without debugging
+- DBGp Proxy registration and unregistration support
 
 ## Remote Host Debugging
 
-To debug a running application on a remote host, you need to tell Xdebug to connect to a different IP than `localhost`. This can either be done by setting [`xdebug.remote_host`](https://xdebug.org/docs/remote#remote_host) to your IP or by setting [`xdebug.remote_connect_back = 1`](https://xdebug.org/docs/remote#remote_connect_back) to make Xdebug always connect back to the machine who did the web request. The latter is the only setting that supports multiple users debugging the same server and "just works" for web projects. Again, please see the [Xdebug documentation](https://xdebug.org/docs/remote#communcation) on the subject for more information.
+To debug a running application on a remote host, you need to tell Xdebug to connect to a different IP than `localhost`. This can either be done by setting [`xdebug.remote_host`](https://xdebug.org/docs/remote#remote_host) to your IP or by setting [`xdebug.discover_client_host = 1`](https://xdebug.org/docs/all_settings#discover_client_host) to make Xdebug always connect back to the machine who did the web request. The latter is the only setting that supports multiple users debugging the same server and "just works" for web projects. Again, please see the [Xdebug documentation](https://xdebug.org/docs/remote#communcation) on the subject for more information.
 
 To make VS Code map the files on the server to the right files on your local machine, you have to set the `pathMappings` settings in your launch.json. Example:
 
@@ -120,6 +135,14 @@ To make VS Code map the files on the server to the right files on your local mac
 ```
 
 Please also note that setting any of the CLI debugging options will not work with remote host debugging, because the script is always launched locally. If you want to debug a CLI script on a remote host, you need to launch it manually from the command line.
+
+## Proxy support
+
+The debugger can register itself to a DBGp proxy with a IDE Key. The proxy will then forward to the IDE only those DBGp sessions that have this specified IDE key. This is helpful in a multiuser environment where developers cannot use the same DBGp port at the same time. Careful setup is needed that requests to the web server contain the matching IDE key.
+
+The official implementation of the [dbgpProxy](https://xdebug.org/docs/dbgpProxy).
+
+A _Xdebug helper_ browser extension is also recommended. There the request side IDE key can be easily configured.
 
 ## Troubleshooting
 

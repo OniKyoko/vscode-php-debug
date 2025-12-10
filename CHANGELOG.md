@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](http://keepachangelog.com/) and this project adheres to [Semantic Versioning](http://semver.org/).
 
+## [1.22.0]
+
+### Added
+
+- DBGp Proxy support.
+- `php.debug.ideKey` setting to set the Proxy IDE key globally.
+
+### Changed
+
+- Renamed `php.executablePath` setting to `php.debug.executablePath` and do not fallback to `php.validate.executablePath`.
+- Untrusted workspace settings.
+- Default protocol encoding changed to utf-8.
+
+## [1.21.1]
+
+### Fixed
+
+- Auto configure runtimeExecutable when only runtimeArgs are used (built-in web server).
+- Improve handling of broken clients on failed initPacket.
+
+## [1.21.0]
+
+### Added
+
+- Support for maxConnections limiting how many parallel connections the debug adapter allows.
+
+## [1.20.0]
+
+### Added
+
+- Support no-folder debugging in (purple) VS Code.
+
+## [1.19.0]
+
+### Added
+
+- Support for PHP 8.1 facets
+- Support for Xdebug 3.1 xdebug_notify()
+
+## [1.18.0]
+
+- Added hit count breakpoint condition.
+
+## [1.17.0]
+
+### Added
+
+- Added logpoint support.
+
+## [1.16.3]
+
+### Fixed
+
+- Fixed semver dependency error.
+
+## [1.16.2]
+
+### Fixed
+
+- Fixed breakpoint and launch initialization order.
+- Optimize feature negotiation for known Xdebug version.
+
 ## [1.16.1]
 
 ### Fixed
